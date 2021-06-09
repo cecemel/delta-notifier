@@ -1,3 +1,2 @@
-FROM semtech/mu-javascript-template
-MAINTAINER Aad Versteden <madnificent@gmail.com>
-
+FROM semtech/mu-javascript-template:1.3.5
+LABEL maintainer="madnificent@gmail.com"
