@@ -1,6 +1,6 @@
 {
   "name": "delta-notifier",
-  "version": "0.2.0-beta.1",
+  "version": "0.2.0-beta.2",
   "description": "Sends notifications about changes to interested mu.semte.ch microservices",
   "main": "app.js",
   "scripts": {
