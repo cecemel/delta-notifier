@@ -1,0 +1,41 @@
+---
+kind: pipeline
+type: docker
+name: push-latest-build
+steps:
+- name: push-latest-build
+  image: plugins/docker
+  settings:
+    repo: ${DRONE_REPO}
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    purge: true
+trigger:
+  branch:
+    - master
+---
+kind: pipeline
+type: docker
+name: release
+steps:
+- name: build-dry-run
+  image: plugins/docker
+  settings:
+    repo: ${DRONE_REPO}
+    dry_run: true
+    purge: true
+- name: push-tagged-build
+  image: plugins/docker
+  settings:
+    repo: ${DRONE_REPO}
+    tags: ${DRONE_TAG##v}
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+    purge: true
+trigger:
+  event:
+    - tag
