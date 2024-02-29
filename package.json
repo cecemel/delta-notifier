@@ -20,8 +20,5 @@
   "bugs": {
     "url": "https://github.com/mu-semtech/delta-notifier/issues"
   },
-  "homepage": "https://github.com/mu-semtech/delta-notifier#readme",
-  "dependencies": {
-    "request": "^2.88.0"
-  }
+  "homepage": "https://github.com/mu-semtech/delta-notifier#readme"
 }

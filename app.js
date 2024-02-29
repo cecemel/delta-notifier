@@ -1,16 +1,8 @@
 import { app, uuid } from 'mu';
-import request from 'request';
-import services from '/config/rules.js';
+import services from './config/rules';
 import bodyParser from 'body-parser';
 import dns from 'dns';
-
-// Also parse application/json as json
-app.use( bodyParser.json( {
-  type: function(req) {
-    return /^application\/json/.test( req.get('content-type') );
-  },
-  limit: '500mb'
-} ) );
+import http from 'http';
 
 // Log server config if requested
 if( process.env["LOG_SERVER_CONFIGURATION"] )
@@ -21,7 +13,7 @@ app.get( '/', function( req, res ) {
   res.send("Hello, delta notification is running");
 } );
 
-app.post( '/', function( req, res ) {
+app.post( '/', bodyParser.json({limit: '500mb'}), function( req, res ) {
   if( process.env["LOG_REQUESTS"] ) {
     console.log("Logging request body");
     console.log(req.body);
@@ -32,6 +24,7 @@ app.post( '/', function( req, res ) {
   const originalMuCallIdTrail = JSON.parse( req.get('mu-call-id-trail') || "[]" );
   const originalMuCallId = req.get('mu-call-id');
   const muCallIdTrail = JSON.stringify( [...originalMuCallIdTrail, originalMuCallId] );
+  const muSessionId = req.get('mu-session-id');
 
   const muCallScopeId = req.get('mu-call-scope-id');
 
@@ -41,13 +34,14 @@ app.post( '/', function( req, res ) {
   } );
 
   // inform watchers
-  informWatchers( changeSets, res, muCallIdTrail, muCallScopeId );
+  informWatchers( changeSets, res, muCallIdTrail, muSessionId, muCallScopeId );
 
   // push relevant data to interested actors
   res.status(204).send();
 } );
 
-async function informWatchers( changeSets, res, muCallIdTrail, muCallScopeId ){
+
+async function informWatchers( changeSets, res, muCallIdTrail, muSessionId, muCallScopeId ){
   services.map( async (entry) => {
     // for each entity
     if( process.env["DEBUG_DELTA_MATCH"] )
@@ -78,7 +72,6 @@ async function informWatchers( changeSets, res, muCallIdTrail, muCallScopeId ){
 
       if( process.env["DEBUG_TRIPLE_MATCHES_SPEC"] )
         console.log(`Triple matches spec? ${someTripleMatchedSpec}`);
-
       if( someTripleMatchedSpec ) {
         // inform matching entities
         if( process.env["DEBUG_DELTA_SEND"] )
@@ -86,10 +79,10 @@ async function informWatchers( changeSets, res, muCallIdTrail, muCallScopeId ){
 
         if( entry.options && entry.options.gracePeriod ) {
           setTimeout(
-            () => sendRequest( entry, originFilteredChangeSets, muCallIdTrail ),
+            () => sendRequest( entry, originFilteredChangeSets, muCallIdTrail, muSessionId ),
             entry.options.gracePeriod );
         } else {
-          sendRequest( entry, originFilteredChangeSets, muCallIdTrail );
+          sendRequest( entry, originFilteredChangeSets, muCallIdTrail, muSessionId );
         }
       }
     }
@@ -150,54 +143,48 @@ function formatChangesetBody( changeSets, options ) {
   }
 }
 
-async function sendRequest( entry, changeSets, muCallIdTrail ) {
+async function sendRequest( entry, changeSets, muCallIdTrail, muSessionId ) {
   let requestObject; // will contain request information
 
   // construct the requestObject
   const method = entry.callback.method;
   const url = entry.callback.url;
-  const headers = { "Content-Type": "application/json", "MU-AUTH-ALLOWED-GROUPS": changeSets[0].allowedGroups, "mu-call-id-trail": muCallIdTrail, "mu-call-id": uuid() };
+  const headers = { "Content-Type": "application/json", "MU-AUTH-ALLOWED-GROUPS": changeSets[0].allowedGroups, "mu-call-id-trail": muCallIdTrail, "mu-call-id": uuid() , "mu-session-id": muSessionId };
 
+  let body;
   if( entry.options && entry.options.resourceFormat ) {
     // we should send contents
-    const body = formatChangesetBody( changeSets, entry.options );
-
-    // TODO: we now assume the mu-auth-allowed-groups will be the same
-    // for each changeSet.  that's a simplification and we should not
-    // depend on it.
-
-    requestObject = {
-      url, method,
-      headers,
-      body: body
-    };
-  } else {
-    // we should only inform
-    requestObject = { url, method, headers };
+    body = formatChangesetBody( changeSets, entry.options );
   }
-
   if( process.env["DEBUG_DELTA_SEND"] )
     console.log(`Executing send ${method} to ${url}`);
-
-  request( requestObject, function( error, response, body ) {
-    if( error ) {
-      console.log(`Could not send request ${method} ${url}`);
-      console.log(error);
-      console.log(`NOT RETRYING`); // TODO: retry a few times when delta's fail to send
+  try {
+    const keepAliveAgent = new http.Agent({
+      keepAlive: true
+    });
+    const response = await fetch(url, { method, headers, body, agent: keepAliveAgent });
+    if (!response.ok) {
+      console.log(`Call to ${method} ${url} likely failed. Received status ${response.status}.`);
     }
-
-    if( response ) {
-      // console.log( body );
-    }
-  });
+  } catch(error) {
+    console.log(`Could not send request ${method} ${url}`);
+    console.log(error);
+    console.log(`NOT RETRYING`); // TODO: retry a few times when delta's fail to send
+  }
 }
 
 async function filterMatchesForOrigin( changeSets, entry ) {
   if( ! entry.options || !entry.options.ignoreFromSelf ) {
     return changeSets;
   } else {
-    const originIpAddress = await getServiceIp( entry );
-    return changeSets.filter( (changeSet) => changeSet.origin != originIpAddress );
+    try {
+      const originIpAddress = await getServiceIp( entry );
+      return changeSets.filter( (changeSet) => changeSet.origin != originIpAddress );
+    } catch(e) {
+      console.error(`Could not filter changeset because an error was returned while looking up ip for ${entry.callback.url}`);
+      console.error(e);
+      return changeSets;
+    }
   }
 }
 
