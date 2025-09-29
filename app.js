@@ -1,8 +1,11 @@
-import { app, uuid } from 'mu';
+import { app } from 'mu';
 import services from './config/rules';
+import normalizeQuad from './config/normalize-quad';
 import bodyParser from 'body-parser';
 import dns from 'dns';
-import http from 'http';
+import { foldChangeSets } from './folding';
+import { sendRequest } from './send-request';
+import { sendBundledRequest } from './bundle-requests';
 
 // Log server config if requested
 if( process.env["LOG_SERVER_CONFIGURATION"] )
@@ -29,8 +32,10 @@ app.post( '/', bodyParser.json({limit: '500mb'}), function( req, res ) {
   const muCallScopeId = req.get('mu-call-scope-id');
 
   changeSets.forEach( (change) => {
-    change.insert = change.insert || [];
-    change.delete = change.delete || [];
+    ['insert', 'delete', 'effectiveInsert', 'effectiveDelete']
+      .map( (key) => {
+        change[key] = (change[key] || []).map(normalizeQuad);
+      } );
   } );
 
   // inform watchers
@@ -40,9 +45,9 @@ app.post( '/', bodyParser.json({limit: '500mb'}), function( req, res ) {
   res.status(204).send();
 } );
 
-
 async function informWatchers( changeSets, res, muCallIdTrail, muSessionId, muCallScopeId ){
-  services.map( async (entry) => {
+  services.map( async (entry, index) => {
+    entry.index = index;
     // for each entity
     if( process.env["DEBUG_DELTA_MATCH"] )
       console.log(`Checking if we want to send to ${entry.callback.url}`);
@@ -78,15 +83,14 @@ async function informWatchers( changeSets, res, muCallIdTrail, muSessionId, muCa
           console.log(`Going to send ${entry.callback.method} to ${entry.callback.url}`);
 
         if( entry.options && entry.options.gracePeriod ) {
-          setTimeout(
-            () => sendRequest( entry, originFilteredChangeSets, muCallIdTrail, muSessionId ),
-            entry.options.gracePeriod );
+          sendBundledRequest(entry, originFilteredChangeSets, muCallIdTrail, muSessionId);
         } else {
-          sendRequest( entry, originFilteredChangeSets, muCallIdTrail, muSessionId );
+          const foldedChangeSets = foldChangeSets( entry, originFilteredChangeSets );
+          sendRequest( entry, foldedChangeSets, muCallIdTrail, muSessionId );
         }
       }
     }
-  } );
+  });
 }
 
 function tripleMatchesSpec( triple, matchSpec ) {
@@ -108,69 +112,6 @@ function tripleMatchesSpec( triple, matchSpec ) {
         return false;
   }
   return true; // no false matches found, let's send a response
-}
-
-
-function formatChangesetBody( changeSets, options ) {
-  if( options.resourceFormat == "v0.0.1" ) {
-    return JSON.stringify(
-      changeSets.map( (change) => {
-        return {
-          inserts: change.insert,
-          deletes: change.delete
-        };
-      } ) );
-  }
-  if( options.resourceFormat == "v0.0.0-genesis" ) {
-    // [{delta: {inserts, deletes}]
-    const newOptions = Object.assign({}, options, { resourceFormat: "v0.0.1" });
-    const newFormat = JSON.parse( formatChangesetBody( changeSets, newOptions ) );
-    return JSON.stringify({
-      // graph: Not available
-      delta: {
-        inserts: newFormat
-          .flatMap( ({inserts}) => inserts)
-          .map( ({subject,predicate,object}) =>
-                ( { s: subject.value, p: predicate.value, o: object.value } ) ),
-        deletes: newFormat
-          .flatMap( ({deletes}) => deletes)
-          .map( ({subject,predicate,object}) =>
-                ( { s: subject.value, p: predicate.value, o: object.value } ) )
-      }
-    });
-  } else {
-    throw `Unknown resource format ${options.resourceFormat}`;
-  }
-}
-
-async function sendRequest( entry, changeSets, muCallIdTrail, muSessionId ) {
-  let requestObject; // will contain request information
-
-  // construct the requestObject
-  const method = entry.callback.method;
-  const url = entry.callback.url;
-  const headers = { "Content-Type": "application/json", "MU-AUTH-ALLOWED-GROUPS": changeSets[0].allowedGroups, "mu-call-id-trail": muCallIdTrail, "mu-call-id": uuid() , "mu-session-id": muSessionId };
-
-  let body;
-  if( entry.options && entry.options.resourceFormat ) {
-    // we should send contents
-    body = formatChangesetBody( changeSets, entry.options );
-  }
-  if( process.env["DEBUG_DELTA_SEND"] )
-    console.log(`Executing send ${method} to ${url}`);
-  try {
-    const keepAliveAgent = new http.Agent({
-      keepAlive: true
-    });
-    const response = await fetch(url, { method, headers, body, agent: keepAliveAgent });
-    if (!response.ok) {
-      console.log(`Call to ${method} ${url} likely failed. Received status ${response.status}.`);
-    }
-  } catch(error) {
-    console.log(`Could not send request ${method} ${url}`);
-    console.log(error);
-    console.log(`NOT RETRYING`); // TODO: retry a few times when delta's fail to send
-  }
 }
 
 async function filterMatchesForOrigin( changeSets, entry ) {
